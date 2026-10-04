@@ -1,5 +1,19 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
+import axios from 'axios'
+import {
+  activeZonesOf,
+  affectedCues,
+  CONCURRENT_WINDOW_MS,
+  mergeReceipts,
+  normalizeReceipt,
+  prepareBatch,
+  routeIntersectsZones,
+  type CueChangeRequest,
+  type NormalizedReceipt,
+  type RerouteBatch,
+  type VenueReceipt,
+} from '../reroute/domain'
 
 export type Department = '舞台' | '灯光' | '音响' | '道具'
 export type Point = { x: number; y: number }
@@ -10,6 +24,21 @@ export type Comment = {
   content: string
   createdAt: string
   resolved: boolean
+}
+
+export type RouteSource = '自动改线' | '人工放行'
+export type CueRouteMeta = {
+  source: RouteSource
+  batchId?: string
+  at: string
+  note: string
+}
+
+export type PrintOverride = {
+  cueId: string
+  by: string
+  reason: string
+  at: string
 }
 
 export type Cue = {
@@ -27,6 +56,8 @@ export type Cue = {
   note: string
   status: '草稿' | '待确认' | '已确认'
   comments: Comment[]
+  /** 改线批次接入后由系统记录；原路线没有该字段 */
+  routeMeta?: CueRouteMeta | null
 }
 
 export const seedProject = {
@@ -146,6 +177,39 @@ export const seedCues: Cue[] = [
 ]
 
 const STORAGE_KEY = 'stage-scheduler-draft-v1'
+const REROUTE_STORAGE_KEY = 'stage-scheduler-reroute-v1'
+
+type ReroutePersist = {
+  registry: Record<string, NormalizedReceipt>
+  batches: RerouteBatch[]
+  reviews: CueChangeRequest[]
+  overrides: PrintOverride[]
+  channelFailing: boolean
+  lastCueSubmissions: Record<string, string>
+}
+
+function restoreReroute(): ReroutePersist {
+  const fallback: ReroutePersist = {
+    registry: {},
+    batches: [],
+    reviews: [],
+    overrides: [],
+    channelFailing: false,
+    lastCueSubmissions: {},
+  }
+  try {
+    const raw = localStorage.getItem(REROUTE_STORAGE_KEY)
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw) as Partial<ReroutePersist>
+    // 旧数据没有场馆版本：补首版兼容
+    const registry = Object.fromEntries(
+      Object.entries(parsed.registry ?? {}).map(([orderNo, receipt]) => [orderNo, normalizeReceipt(receipt as VenueReceipt)]),
+    )
+    return { ...fallback, ...parsed, registry }
+  } catch {
+    return fallback
+  }
+}
 
 export const useWorkshopStore = defineStore('workshop', () => {
   const saved = localStorage.getItem(STORAGE_KEY)
@@ -163,6 +227,16 @@ export const useWorkshopStore = defineStore('workshop', () => {
   const undoStack = ref<Cue[][]>([])
   const redoStack = ref<Cue[][]>([])
 
+  // ---- 改线批次：场馆回执版本表 / 批次 / 并发复核 / 打印放行 ----
+  const persistedReroute = restoreReroute()
+  const receiptRegistry = ref<Record<string, NormalizedReceipt>>(persistedReroute.registry)
+  const batches = ref<RerouteBatch[]>(persistedReroute.batches)
+  const reviewQueue = ref<CueChangeRequest[]>(persistedReroute.reviews)
+  const printOverrides = ref<PrintOverride[]>(persistedReroute.overrides)
+  const channelFailing = ref(persistedReroute.channelFailing)
+  const lastCueSubmissions = ref<Record<string, string>>(persistedReroute.lastCueSubmissions)
+  const submittingBatch = ref(false)
+
   const selectedCue = computed(() => cues.value.find((cue) => cue.id === selectedId.value) ?? cues.value[0])
   const filteredCues = computed(() =>
     cues.value.filter(
@@ -177,6 +251,21 @@ export const useWorkshopStore = defineStore('workshop', () => {
     ),
   )
 
+  // ---- 生效封闭区 / 受影响提示 / 打印拦截（实时按当前路线计算） ----
+  const activeZones = computed(() => activeZonesOf(receiptRegistry.value))
+  const affectedCueList = computed(() => affectedCues(cues.value, activeZones.value))
+  const affectedCueIds = computed(() => new Set(affectedCueList.value.map((cue) => cue.id)))
+  const overrideCueIds = computed(() => new Set(printOverrides.value.map((item) => item.cueId)))
+  /** 仍与封闭区冲突且没有人工放行记录：清单打印必须挡住 */
+  const printBlockedCues = computed(() =>
+    activeZones.value.length
+      ? cues.value.filter((cue) => routeIntersectsZones(cue.route, activeZones.value) && !overrideCueIds.value.has(cue.id))
+      : [],
+  )
+  const pendingReviews = computed(() => reviewQueue.value.filter((item) => item.status === '待复核'))
+  const latestBatch = computed<RerouteBatch | undefined>(() => batches.value[batches.value.length - 1])
+  const failedBatches = computed(() => batches.value.filter((batch) => batch.status === '提交失败'))
+
   watch(
     [cues, rev, isOffline],
     () => {
@@ -186,8 +275,27 @@ export const useWorkshopStore = defineStore('workshop', () => {
     { deep: true },
   )
 
+  watch(
+    [receiptRegistry, batches, reviewQueue, printOverrides, channelFailing, lastCueSubmissions],
+    () => {
+      const payload: ReroutePersist = {
+        registry: receiptRegistry.value,
+        batches: batches.value,
+        reviews: reviewQueue.value,
+        overrides: printOverrides.value,
+        channelFailing: channelFailing.value,
+        lastCueSubmissions: lastCueSubmissions.value,
+      }
+      localStorage.setItem(REROUTE_STORAGE_KEY, JSON.stringify(payload))
+    },
+    { deep: true },
+  )
+
+  // JSON 克隆可安全处理 Vue 响应式代理（structuredClone 在部分环境对代理报错）
+  const cloneCues = () => JSON.parse(JSON.stringify(cues.value)) as Cue[]
+
   function snapshot() {
-    undoStack.value.push(structuredClone(cues.value))
+    undoStack.value.push(cloneCues())
     if (undoStack.value.length > 20) undoStack.value.shift()
     redoStack.value = []
   }
@@ -235,7 +343,7 @@ export const useWorkshopStore = defineStore('workshop', () => {
   function undo() {
     const previous = undoStack.value.pop()
     if (!previous) return
-    redoStack.value.push(structuredClone(cues.value))
+    redoStack.value.push(cloneCues())
     cues.value = previous
     rev.value += 1
   }
@@ -243,7 +351,7 @@ export const useWorkshopStore = defineStore('workshop', () => {
   function redo() {
     const next = redoStack.value.pop()
     if (!next) return
-    undoStack.value.push(structuredClone(cues.value))
+    undoStack.value.push(cloneCues())
     cues.value = next
     rev.value += 1
   }
@@ -284,6 +392,144 @@ export const useWorkshopStore = defineStore('workshop', () => {
     isOffline.value = !isOffline.value
   }
 
+  // -------------------------------------------------------------------------
+  // 改线批次
+  // -------------------------------------------------------------------------
+
+  /** 只做回执合并预检（不生成批次），供工作台查看新旧版本判定 */
+  function previewReceipts(receipts: VenueReceipt[]) {
+    return mergeReceipts(receiptRegistry.value, receipts)
+  }
+
+  /**
+   * 接收场馆回执并接成改线批次：
+   * 按单号 / 版本登记，旧版本不能盖住较新封闭范围；受影响提示重算路线，
+   * 算不出来的保留原路线（打印拦截由 printBlockedCues 实时判定）。
+   */
+  function ingestReceipts(receipts: VenueReceipt[]): RerouteBatch {
+    const prepared = prepareBatch(receiptRegistry.value, receipts, cues.value)
+    receiptRegistry.value = prepared.registry
+    snapshot()
+    const at = new Date().toISOString()
+    for (const item of prepared.batch.items) {
+      if (item.status !== '已改线' || !item.newRoute) continue
+      const cue = cues.value.find((entry) => entry.id === item.cueId)
+      if (!cue) continue
+      cue.route = JSON.parse(JSON.stringify(item.newRoute)) as typeof item.newRoute
+      cue.entry = { ...item.newRoute[0] }
+      cue.exit = { ...item.newRoute[item.newRoute.length - 1] }
+      cue.routeMeta = { source: '自动改线', batchId: prepared.batch.id, at, note: `按场馆回执 ${item.hitOrderNos.join('、')} 绕行` }
+      // 原批次问题解除后，旧的人工放行记录随之失效
+      printOverrides.value = printOverrides.value.filter((entry) => entry.cueId !== cue.id)
+    }
+    rev.value += 1
+    batches.value.push(prepared.batch)
+    return prepared.batch
+  }
+
+  async function commitBatch(batchId: string) {
+    const batch = batches.value.find((item) => item.id === batchId)
+    if (!batch || batch.status === '已生效') return
+    submittingBatch.value = true
+    batch.attempts += 1
+    try {
+      await axios.post(
+        '/api/reroute-batches',
+        { batchId, receipts: batch.receipts },
+        { headers: { 'x-venue-fail': channelFailing.value ? '1' : '0' } },
+      )
+      batch.status = '已生效'
+      batch.lastError = ''
+      batch.appliedAt = new Date().toISOString()
+    } catch (error) {
+      // 回执失败：批次保留原编号 / 原回执，等待「按原批次重试」
+      batch.status = '提交失败'
+      batch.lastError = error instanceof Error ? error.message : '场馆回执通道异常'
+      throw error
+    } finally {
+      submittingBatch.value = false
+    }
+  }
+
+  /** 回执失败后按原批次重试：不新建批次、不重新编号 */
+  async function retryBatch(batchId: string) {
+    await commitBatch(batchId)
+  }
+
+  function setChannelFailing(value: boolean) {
+    channelFailing.value = value
+  }
+
+  // ---- 算不出来的提示：保留原路线，打印须人工放行 ----
+
+  function releaseForPrint(cueId: string, reason: string, by = '舞台监督') {
+    const cue = cues.value.find((item) => item.id === cueId)
+    if (!cue || !printBlockedCues.value.some((item) => item.id === cueId)) return
+    printOverrides.value.push({ cueId, by, reason, at: new Date().toISOString() })
+    cue.routeMeta = { source: '人工放行', at: new Date().toISOString(), note: reason }
+  }
+
+  function revokeOverride(cueId: string) {
+    printOverrides.value = printOverrides.value.filter((item) => item.cueId !== cueId)
+  }
+
+  // ---- 调度员同时提交同一提示：先到生效，后到留待复核 ----
+
+  function submitCueChange(
+    cueId: string,
+    dispatcher: string,
+    patch: CueChangeRequest['patch'],
+    now: number = Date.now(),
+  ): { applied: boolean; request: CueChangeRequest } {
+    const cue = cues.value.find((item) => item.id === cueId)
+    if (!cue) throw new Error(`提示 ${cueId} 不存在`)
+    const lastAt = lastCueSubmissions.value[cueId]
+    const inWindow = lastAt && now - new Date(lastAt).getTime() <= CONCURRENT_WINDOW_MS
+
+    const request: CueChangeRequest = {
+      id: `rev-${now}`,
+      cueId,
+      cueTitle: cue.title,
+      dispatcher,
+      submittedAt: new Date(now).toISOString(),
+      patch,
+      status: '待复核',
+      note: inWindow ? `与上一笔提交间隔小于 ${CONCURRENT_WINDOW_MS / 1000} 秒，先到已生效，留待复核` : '同提示并发提交',
+    }
+
+    if (!inWindow) {
+      lastCueSubmissions.value[cueId] = new Date(now).toISOString()
+      snapshot()
+      cues.value.forEach((item) => {
+        if (item.id === cueId) Object.assign(item, patch)
+      })
+      rev.value += 1
+      request.status = '已采纳'
+      request.note = '先到提交，已直接生效'
+      return { applied: true, request }
+    }
+
+    // 后到提交：不改数据，进入复核队列
+    reviewQueue.value.unshift(request)
+    return { applied: false, request }
+  }
+
+  function adoptReview(requestId: string) {
+    const request = reviewQueue.value.find((item) => item.id === requestId)
+    if (!request || request.status !== '待复核') return
+    snapshot()
+    const cue = cues.value.find((item) => item.id === request.cueId)
+    if (cue) Object.assign(cue, request.patch)
+    request.status = '已采纳'
+    lastCueSubmissions.value[request.cueId] = request.submittedAt
+    rev.value += 1
+  }
+
+  function rejectReview(requestId: string) {
+    const request = reviewQueue.value.find((item) => item.id === requestId)
+    if (request) request.status = '已驳回'
+  }
+
   return {
     cues,
     selectedId,
@@ -309,5 +555,30 @@ export const useWorkshopStore = defineStore('workshop', () => {
     lockBaseline,
     unlockBaseline,
     toggleOffline,
+    // 改线批次
+    receiptRegistry,
+    batches,
+    reviewQueue,
+    printOverrides,
+    channelFailing,
+    submittingBatch,
+    activeZones,
+    affectedCueList,
+    affectedCueIds,
+    overrideCueIds,
+    printBlockedCues,
+    pendingReviews,
+    latestBatch,
+    failedBatches,
+    previewReceipts,
+    ingestReceipts,
+    commitBatch,
+    retryBatch,
+    setChannelFailing,
+    releaseForPrint,
+    revokeOverride,
+    submitCueChange,
+    adoptReview,
+    rejectReview,
   }
 })

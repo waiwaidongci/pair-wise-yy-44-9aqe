@@ -12,6 +12,8 @@ const acts = ['全部', '第一幕', '第二幕', '第三幕']
 const cue = computed(() => store.selectedCue)
 const routePoints = computed(() => cue.value?.route.map((point) => `${point.x},${point.y}`).join(' ') ?? '')
 const conflictCues = computed(() => new Set(store.conflicts.map((item) => item.id)))
+const blockedCueSet = computed(() => new Set(store.printBlockedCues.map((item) => item.id)))
+const overrideSet = computed(() => store.overrideCueIds)
 
 function selectCue(item: Cue) {
   store.selectedId = item.id
@@ -69,6 +71,19 @@ function updateCue(key: keyof Cue, value: unknown) {
       description="系统已高亮冲突提示，请在右侧检查触发时间与部门优先级。"
     />
 
+    <el-alert
+      v-if="store.printBlockedCues.length"
+      class="conflict-alert"
+      type="error"
+      show-icon
+      :closable="false"
+      :title="`${store.printBlockedCues.length} 条提示路线仍穿过场馆封闭区，打印清单已挡住`"
+    >
+      <template #default>
+        <el-button size="small" type="danger" plain @click="$router.push('/reroute')">前往改线批次处理</el-button>
+      </template>
+    </el-alert>
+
     <div class="toolbar panel">
       <div class="filter-group">
         <span>幕次</span>
@@ -109,6 +124,10 @@ function updateCue(key: keyof Cue, value: unknown) {
                 </marker>
               </defs>
               <rect width="100" height="100" fill="url(#grid)" />
+              <template v-for="zone in store.activeZones" :key="`${zone.orderNo}-${zone.id}`">
+                <rect :x="zone.x" :y="zone.y" :width="zone.w" :height="zone.h" rx="0.8" class="closed-zone" />
+                <text :x="zone.x + 1" :y="zone.y + 3" class="closed-label">{{ zone.orderNo }} v{{ zone.version }}</text>
+              </template>
               <rect x="3" y="2" width="94" height="12" rx="1" class="backstage" />
               <rect x="5" y="88" width="90" height="9" rx="1" class="apron" />
               <line x1="50" y1="14" x2="50" y2="88" class="center-line" />
@@ -116,7 +135,15 @@ function updateCue(key: keyof Cue, value: unknown) {
                 <polyline
                   v-if="item.route.length > 1"
                   :points="item.route.map((point) => `${point.x},${point.y}`).join(' ')"
-                  :class="['route', { selected: item.id === store.selectedId, conflict: conflictCues.has(item.id) }]"
+                  :class="[
+                    'route',
+                    {
+                      selected: item.id === store.selectedId,
+                      conflict: conflictCues.has(item.id),
+                      blocked: blockedCueSet.has(item.id),
+                      overridden: overrideSet.has(item.id),
+                    },
+                  ]"
                   marker-end="url(#arrow)"
                 />
                 <g class="cue-point" :class="{ selected: item.id === store.selectedId }" @click.stop="selectCue(item)">
@@ -133,6 +160,7 @@ function updateCue(key: keyof Cue, value: unknown) {
               <span><i class="entry" />入场</span>
               <span><i class="way" />路线</span>
               <span><i class="exit" />退场</span>
+              <span><i class="closed" />封闭区</span>
             </div>
           </div>
         </div>
@@ -147,6 +175,35 @@ function updateCue(key: keyof Cue, value: unknown) {
             </div>
             <el-tag :type="cue.status === '已确认' ? 'success' : 'warning'" effect="plain">{{ cue.status }}</el-tag>
           </div>
+
+          <el-alert
+            v-if="blockedCueSet.has(cue.id)"
+            class="cue-closed-alert"
+            type="error"
+            show-icon
+            :closable="false"
+            title="路线仍穿过场馆封闭区，打印已挡住"
+            description="保留原路线；请到改线批次接入较新回执，或申请人工放行。"
+          >
+            <el-button size="small" type="danger" plain @click="$router.push('/reroute')">去改线批次</el-button>
+          </el-alert>
+          <el-alert
+            v-else-if="cue.routeMeta?.source === '自动改线'"
+            class="cue-closed-alert"
+            type="success"
+            show-icon
+            :closable="false"
+            :title="`已按场馆回执自动改线（${cue.routeMeta.batchId}）`"
+            :description="cue.routeMeta.note"
+          />
+          <el-alert
+            v-else-if="overrideSet.has(cue.id)"
+            class="cue-closed-alert"
+            type="warning"
+            show-icon
+            :closable="false"
+            title="该提示已经人工放行，可进入打印清单"
+          />
 
           <el-form label-position="top" size="small" :disabled="store.locked">
             <div class="form-grid">
@@ -211,7 +268,7 @@ function updateCue(key: keyof Cue, value: unknown) {
           v-for="item in [...store.filteredCues].sort((a, b) => a.time.localeCompare(b.time))"
           :key="item.id"
           class="cue-card"
-          :class="{ active: item.id === store.selectedId, conflict: conflictCues.has(item.id) }"
+          :class="{ active: item.id === store.selectedId, conflict: conflictCues.has(item.id), blocked: blockedCueSet.has(item.id) }"
           @click="selectCue(item)"
         >
           <span>{{ item.id }} · {{ item.department }}</span>
@@ -339,6 +396,35 @@ function updateCue(key: keyof Cue, value: unknown) {
   stroke-dasharray: 2 1.2;
 }
 
+.route.blocked {
+  stroke: #b33a2c;
+  stroke-width: 1.2;
+  stroke-dasharray: 3 1.4;
+}
+
+.route.overridden {
+  stroke: #c08a2c;
+  stroke-dasharray: 2.4 1.4;
+}
+
+.closed-zone {
+  fill: rgb(207 91 63 / 18%);
+  stroke: #cf5b3f;
+  stroke-width: 0.35;
+  stroke-dasharray: 1.4 1;
+}
+
+.closed-label {
+  fill: #a8402d;
+  font-size: 2px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.cue-closed-alert {
+  margin-bottom: 12px;
+}
+
 .cue-point circle {
   fill: #fff;
   stroke: #247d7b;
@@ -401,6 +487,11 @@ function updateCue(key: keyof Cue, value: unknown) {
 
 .stage-legend .exit {
   background: #bb4d3e;
+}
+
+.stage-legend .closed {
+  background: repeating-linear-gradient(45deg, #cf5b3f 0 2px, rgb(255 255 255 / 70%) 2px 4px);
+  border: 1px solid #cf5b3f;
 }
 
 .editor-panel {
@@ -530,6 +621,11 @@ function updateCue(key: keyof Cue, value: unknown) {
 
 .cue-card.conflict {
   border-left: 4px solid #cf5b3f;
+}
+
+.cue-card.blocked {
+  border-color: #cf5b3f;
+  background: #fdf3f1;
 }
 
 .cue-card span,

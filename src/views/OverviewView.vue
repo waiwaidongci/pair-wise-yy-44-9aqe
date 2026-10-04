@@ -20,6 +20,7 @@ const { data: project } = useQuery({
 const pending = computed(() => store.cues.filter((cue) => cue.status !== '已确认').length)
 const comments = computed(() => store.cues.reduce((total, cue) => total + cue.comments.filter((item) => !item.resolved).length, 0))
 const totalMinutes = computed(() => Math.round(store.cues.reduce((sum, cue) => sum + cue.duration, 0) / 60))
+const rerouteBlocked = computed(() => store.printBlockedCues.length)
 const byDepartment = computed(() =>
   ['舞台', '灯光', '音响', '道具'].map((department) => ({
     department,
@@ -42,6 +43,21 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
         <el-button type="primary" @click="$router.push('/stage')">进入舞台工作区</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="rerouteBlocked || store.pendingReviews.length || store.failedBatches.length"
+      class="reroute-banner"
+      :type="rerouteBlocked || store.failedBatches.length ? 'error' : 'warning'"
+      show-icon
+      :closable="false"
+      :title="[
+        rerouteBlocked ? `${rerouteBlocked} 条提示被封闭区挡住打印` : '',
+        store.pendingReviews.length ? `${store.pendingReviews.length} 笔并发提交待复核` : '',
+        store.failedBatches.length ? `${store.failedBatches.length} 个回执批次提交失败待重试` : '',
+      ].filter(Boolean).join(' · ')"
+    >
+      <el-button size="small" :type="rerouteBlocked ? 'danger' : 'warning'" plain @click="$router.push('/reroute')">进入改线批次</el-button>
+    </el-alert>
 
     <div class="metric-grid">
       <article class="metric">
@@ -115,6 +131,10 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
 
 .red {
   color: #bd4b3f !important;
+}
+
+.reroute-banner {
+  margin-bottom: 14px;
 }
 
 .overview-grid {
