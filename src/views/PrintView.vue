@@ -46,10 +46,28 @@ function exportCsv() {
         <p class="muted">打印版仅包含已选信息，固定 A4 横向布局，适合舞台监督工作台使用。</p>
       </div>
       <div class="actions">
-        <el-button @click="exportCsv">导出 CSV</el-button>
-        <el-button type="primary" @click="print">打印 / 导出 PDF</el-button>
+        <el-button :disabled="store.hasPrintBlock" @click="exportCsv">导出 CSV</el-button>
+        <el-button type="primary" :disabled="store.hasPrintBlock" @click="print">打印 / 导出 PDF</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="store.hasPrintBlock"
+      class="print-block"
+      type="error"
+      show-icon
+      :closable="false"
+      title="打印已挡住：存在无法绕行的封闭区域"
+    >
+      <template #default>
+        <p>以下提示的路线穿越场馆封闭区且无法重算，已保留原路线；请先处理场馆回执或调整路线后再打印。</p>
+        <ul>
+          <li v-for="cue in store.blockedCues" :key="cue.id">
+            <strong>{{ cue.id }}</strong> · {{ cue.title }} — {{ cue.blockReason }}
+          </li>
+        </ul>
+      </template>
+    </el-alert>
 
     <div class="print-options panel no-print">
       <strong>文档内容</strong>
@@ -91,6 +109,7 @@ function exportCsv() {
               <strong>{{ cue.id }} · {{ cue.title }}</strong>
               <p v-if="includeNotes">{{ cue.note }}</p>
               <small v-if="includeRoutes">路线：{{ cue.route.map((point, index) => `${index + 1}. ${point.x}/${point.y}`).join(' → ') }}</small>
+              <em v-if="cue.routeStatus === 'blocked'" class="blocked-note">路线穿越封闭区无法绕行，已保留原路线 · 打印挡住</em>
               <em v-if="includeComments && cue.comments.length">{{ cue.comments.filter((item) => !item.resolved).length }} 条未解决留言</em>
             </td>
             <td>{{ cue.department }}<br /><small>{{ cue.owner }}</small></td>
@@ -126,6 +145,23 @@ function exportCsv() {
   margin-left: auto;
   color: #74818c;
   font-size: 12px;
+}
+
+.print-block {
+  margin-bottom: 14px;
+}
+
+.print-block p {
+  margin: 4px 0;
+}
+
+.print-block ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.blocked-note {
+  color: #b04135 !important;
 }
 
 .print-sheet {

@@ -3,6 +3,7 @@ import OverviewView from './views/OverviewView.vue'
 import StageView from './views/StageView.vue'
 import ScriptView from './views/ScriptView.vue'
 import PrintView from './views/PrintView.vue'
+import BatchesView from './views/BatchesView.vue'
 
 export default createRouter({
   history: createWebHashHistory(),
@@ -11,5 +12,6 @@ export default createRouter({
     { path: '/stage', component: StageView, meta: { title: '舞台走位' } },
     { path: '/script', component: ScriptView, meta: { title: '排练脚本' } },
     { path: '/print', component: PrintView, meta: { title: '打印中心' } },
+    { path: '/batches', component: BatchesView, meta: { title: '改线批次' } },
   ],
 })

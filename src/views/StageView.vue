@@ -128,11 +128,16 @@ function updateCue(key: keyof Cue, value: unknown) {
                 <circle v-for="(point, index) in cue.route.slice(1, -1)" :key="index" :cx="point.x" :cy="point.y" r="1.5" class="waypoint" />
                 <circle :cx="cue.exit.x" :cy="cue.exit.y" r="2.5" class="exit-point" />
               </template>
+              <g v-for="(area, index) in store.activeClosures" :key="`closure-${index}`">
+                <circle :cx="area.x" :cy="area.y" :r="area.r" class="closure-area" />
+                <text :x="area.x" :y="area.y + 1" class="closure-label">封闭区</text>
+              </g>
             </svg>
             <div class="stage-legend">
               <span><i class="entry" />入场</span>
               <span><i class="way" />路线</span>
               <span><i class="exit" />退场</span>
+              <span><i class="closure" />封闭区</span>
             </div>
           </div>
         </div>
@@ -145,7 +150,19 @@ function updateCue(key: keyof Cue, value: unknown) {
               <span>{{ cue.id }} · {{ cue.act }}</span>
               <h3>{{ cue.title }}</h3>
             </div>
-            <el-tag :type="cue.status === '已确认' ? 'success' : 'warning'" effect="plain">{{ cue.status }}</el-tag>
+            <div class="editor-tags">
+              <el-tag :type="cue.status === '已确认' ? 'success' : 'warning'" effect="plain">{{ cue.status }}</el-tag>
+              <el-tag
+                v-if="cue.routeStatus === 'rerouted'"
+                type="warning"
+                effect="dark"
+              >已改线</el-tag>
+              <el-tag
+                v-else-if="cue.routeStatus === 'blocked'"
+                type="danger"
+                effect="dark"
+              >改线失败 · 已保留原路线</el-tag>
+            </div>
           </div>
 
           <el-form label-position="top" size="small" :disabled="store.locked">
@@ -370,6 +387,27 @@ function updateCue(key: keyof Cue, value: unknown) {
   stroke-width: 0.5;
 }
 
+.closure-area {
+  fill: rgb(204 79 66 / 14%);
+  stroke: #cc4f42;
+  stroke-width: 0.7;
+  stroke-dasharray: 1.4 1;
+}
+
+.closure-label {
+  fill: #b04135;
+  font-size: 2.4px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.editor-tags {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
 .stage-legend {
   position: absolute;
   right: 2%;
@@ -401,6 +439,11 @@ function updateCue(key: keyof Cue, value: unknown) {
 
 .stage-legend .exit {
   background: #bb4d3e;
+}
+
+.stage-legend .closure {
+  background: rgb(204 79 66 / 18%);
+  border: 1px dashed #cc4f42;
 }
 
 .editor-panel {
